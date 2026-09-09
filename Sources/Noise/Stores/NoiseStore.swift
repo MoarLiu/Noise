@@ -41,8 +41,9 @@ final class NoiseStore: ObservableObject {
     private let fileManager = FileManager.default
     private let encoder: JSONEncoder
     private let decoder = JSONDecoder()
-    private let audioPlayer = NoiseAudioPlayer()
-    private let previewPlayer = NoiseAudioPlayer()
+    private let audioPlayer: NoiseAudioPlayer
+    private let previewPlayer: NoiseAudioPlayer
+    private let now: () -> Date
     private let notificationService: NoiseNotificationing
     private let dataDirectory: URL
     private let timerQueue = DispatchQueue(label: "com.crazyjal.noise.timer", qos: .utility)
@@ -139,8 +140,17 @@ final class NoiseStore: ObservableObject {
         dataDirectory.appendingPathComponent("state.json")
     }
 
-    init(dataDirectory: URL? = nil, notificationService: NoiseNotificationing = NoiseNotificationService()) {
+    init(
+        dataDirectory: URL? = nil,
+        notificationService: NoiseNotificationing = NoiseNotificationService(),
+        audioPlayer: NoiseAudioPlayer = NoiseAudioPlayer(),
+        previewPlayer: NoiseAudioPlayer = NoiseAudioPlayer(),
+        now: @escaping () -> Date = Date.init
+    ) {
         self.notificationService = notificationService
+        self.audioPlayer = audioPlayer
+        self.previewPlayer = previewPlayer
+        self.now = now
         self.dataDirectory = dataDirectory ?? Self.applicationSupportURL(fileManager: fileManager)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -160,7 +170,7 @@ final class NoiseStore: ObservableObject {
         self.durationSeconds = loadedDuration
         self.remainingSeconds = max(payload?.remainingSeconds ?? loadedDuration, 0)
         self.taskTitle = Self.limitedTaskTitle(payload?.taskTitle ?? "")
-        self.records = Self.filteredRecords(payload?.records ?? [])
+        self.records = Self.filteredRecords(payload?.records ?? [], now: now())
         self.completedFocusRoundsInCycle = min(max(payload?.completedFocusRoundsInCycle ?? 0, 0), settings.roundsUntilLongBreak - 1)
         self.startedAt = payload?.startedAt
         self.endDate = payload?.endDate
@@ -189,6 +199,10 @@ final class NoiseStore: ObservableObject {
         startSession(mode: .focus)
     }
 
+    func startBreak() {
+        startSession(mode: mode == .longBreak ? .longBreak : .shortBreak)
+    }
+
     func startShortBreak() {
         startSession(mode: .shortBreak)
     }
@@ -200,6 +214,10 @@ final class NoiseStore: ObservableObject {
     func pause() {
         guard state == .running else { return }
         updateRemainingFromEndDate()
+        if remainingSeconds <= 0 {
+            completeCurrentSession()
+            return
+        }
         state = .paused
         endDate = nil
         stopTimer()
@@ -209,8 +227,10 @@ final class NoiseStore: ObservableObject {
 
     func resume() {
         guard state == .paused, remainingSeconds > 0 else { return }
-        startedAt = startedAt ?? Date()
-        endDate = Date().addingTimeInterval(TimeInterval(remainingSeconds))
+        stopPreview()
+        let resumedAt = now()
+        startedAt = startedAt ?? resumedAt
+        endDate = resumedAt.addingTimeInterval(TimeInterval(remainingSeconds))
         state = .running
         lastCompletion = nil
         save()
@@ -369,8 +389,9 @@ final class NoiseStore: ObservableObject {
         state = .running
         durationSeconds = seconds
         remainingSeconds = seconds
-        startedAt = Date()
-        endDate = Date().addingTimeInterval(TimeInterval(seconds))
+        let sessionStartedAt = now()
+        startedAt = sessionStartedAt
+        endDate = sessionStartedAt.addingTimeInterval(TimeInterval(seconds))
         lastCompletion = nil
         save()
         scheduleTimerIfNeeded()
@@ -384,7 +405,7 @@ final class NoiseStore: ObservableObject {
         audioPlayer.stop(fadeOut: settings.fadeOutSeconds)
 
         let completedMode = mode
-        let completedAt = Date()
+        let completedAt = endDate ?? now()
         let completedStartedAt = startedAt ?? completedAt.addingTimeInterval(-TimeInterval(durationSeconds))
         let completedTaskTitle = taskTitle
         let completedDuration = durationSeconds
@@ -398,7 +419,7 @@ final class NoiseStore: ObservableObject {
                 completedAt: completedAt
             )
             records.insert(record, at: 0)
-            records = Self.filteredRecords(records)
+            records = Self.filteredRecords(records, now: now())
             focusRecord = record
             completedFocusRoundsInCycle += 1
         }
@@ -482,7 +503,7 @@ final class NoiseStore: ObservableObject {
 
     private func updateRemainingFromEndDate() {
         guard let endDate else { return }
-        remainingSeconds = max(0, Int(ceil(endDate.timeIntervalSince(Date()))))
+        remainingSeconds = max(0, Int(ceil(endDate.timeIntervalSince(now()))))
     }
 
     private func updateSoundPlayback() {
@@ -508,7 +529,7 @@ final class NoiseStore: ObservableObject {
     private func stopPreview() {
         previewStopWorkItem?.cancel()
         previewStopWorkItem = nil
-        previewPlayer.stop(fadeOut: 0.2)
+        previewPlayer.stop(fadeOut: 0)
     }
 
     private func updateSettings(_ mutate: (inout NoiseSettings) -> Void) {
@@ -527,7 +548,7 @@ final class NoiseStore: ObservableObject {
 
     private func normalizeLoadedTimer() {
         if state == .running, let endDate {
-            remainingSeconds = max(0, Int(ceil(endDate.timeIntervalSince(Date()))))
+            remainingSeconds = max(0, Int(ceil(endDate.timeIntervalSince(now()))))
             if remainingSeconds <= 0 {
                 finishElapsedLoadedSession(completedAt: endDate)
             }
@@ -543,6 +564,11 @@ final class NoiseStore: ObservableObject {
             endDate = nil
         } else if state == .paused {
             endDate = nil
+            if remainingSeconds == 0 {
+                // Older versions could save an elapsed pause after discarding its deadline.
+                // Use recovery time when that original completion time is unavailable.
+                finishElapsedLoadedSession(completedAt: now())
+            }
         }
     }
 
@@ -561,7 +587,7 @@ final class NoiseStore: ObservableObject {
                 completedAt: completedAt
             )
             records.insert(record, at: 0)
-            records = Self.filteredRecords(records)
+            records = Self.filteredRecords(records, now: now())
             completedFocusRoundsInCycle += 1
             focusRecord = record
         }

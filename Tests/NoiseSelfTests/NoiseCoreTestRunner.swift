@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 @main
@@ -10,6 +11,13 @@ struct NoiseCoreTestRunner {
         try run("long break transition resets cycle count", longBreakTransitionResetsCycleCount)
         try run("notification authorization is not requested on plain launch", notificationAuthorizationIsNotRequestedOnPlainLaunch)
         try run("menu bar status reflects paused restored timer", menuBarStatusReflectsPausedRestoredTimer)
+        try run("manual rest starts the break selected by the cycle", manualRestHonorsCycle)
+        try run("pause at deadline completes once with either auto-start setting", pauseAtDeadlineCompletesOnce)
+        try run("pause and resume preserve remaining focus time", pauseAndResumePreserveRemainingTime)
+        try run("wake after midnight records the original deadline", delayedWakeRecordsOriginalDeadline)
+        try run("zero-second paused state is recovered once", zeroSecondPausedStateIsRecoveredOnce)
+        try run("replay during fade-out cancels the old stop", replayDuringFadeOutCancelsOldStop)
+        try run("resume stops preview before starting session audio", resumeStopsPreviewBeforeSessionAudio)
         print("All Noise self-tests passed.")
     }
 
@@ -173,6 +181,242 @@ private func menuBarStatusReflectsPausedRestoredTimer() throws {
 
     store.stop()
     try expect(store.menuBarSystemImage == "waveform", "idle timer should use default menu bar icon")
+}
+
+private func manualRestHonorsCycle() throws {
+    for previousRounds in [0, 3] {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = TestClock()
+        let settings = quietSettings()
+        try writeState(
+            in: directory,
+            mode: .focus,
+            state: .running,
+            durationSeconds: 1_500,
+            remainingSeconds: 1,
+            taskTitle: "Cycle review",
+            startedAt: clock.date.addingTimeInterval(-1_600),
+            endDate: clock.date.addingTimeInterval(-100),
+            completedFocusRoundsInCycle: previousRounds,
+            settings: settings
+        )
+        let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService(), now: { clock.date })
+        defer { store.stop() }
+        let expectedMode: NoiseTimerMode = previousRounds == 3 ? .longBreak : .shortBreak
+        let expectedDuration = (previousRounds == 3 ? settings.longBreakMinutes : settings.shortBreakMinutes) * 60
+
+        try expect(store.mode == expectedMode, "completion should prepare the appropriate break")
+        store.startBreak()
+
+        try expect(store.state == .running, "manual rest should start the prepared break")
+        try expect(store.mode == expectedMode, "manual rest must preserve a scheduled long break")
+        try expect(store.remainingSeconds == expectedDuration, "rest should use the appropriate configured duration")
+        try expect(store.completedFocusRoundsInCycle == (previousRounds == 3 ? 0 : 1), "starting rest should preserve the cycle count")
+    }
+}
+
+private func pauseAtDeadlineCompletesOnce() throws {
+    for autoStart in [false, true] {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = TestClock()
+        let notifications = FakeNotificationService()
+        let store = NoiseStore(dataDirectory: directory, notificationService: notifications, now: { clock.date })
+        defer { store.stop() }
+        store.setFocusSound(.none)
+        store.setAutoStartNextRound(autoStart)
+        store.startFocus()
+        let deadline = clock.date.addingTimeInterval(TimeInterval(store.durationSeconds))
+        clock.date = deadline
+
+        store.pause()
+
+        try expect(store.state == (autoStart ? .running : .idle), "elapsed focus should complete instead of entering a zero-second pause")
+        try expect(store.mode == .shortBreak, "elapsed focus should transition to rest")
+        try expect(store.remainingSeconds == store.settings.shortBreakMinutes * 60, "the next round should have its full duration")
+        try expect(store.records.count == 1, "elapsed focus should create exactly one record")
+        try expect(store.records.first?.completedAt == deadline, "pause at deadline should preserve the completion timestamp")
+        try expect(notifications.deliveries.count == 1, "elapsed focus should notify once")
+
+        // Simulate a timer/wake event that was queued before the pause action.
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        store.resume()
+        try expect(store.records.count == 1, "a queued event or resume action must not duplicate the completed focus")
+        try expect(notifications.deliveries.count == 1, "a queued event must not notify twice")
+    }
+}
+
+private func pauseAndResumePreserveRemainingTime() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = TestClock()
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService(), now: { clock.date })
+    defer { store.stop() }
+    store.setFocusSound(.none)
+    store.startFocus()
+    clock.date.addTimeInterval(10)
+    store.pause()
+    try expect(store.state == .paused && store.remainingSeconds == 1_490, "pause before deadline should preserve the remaining focus")
+    try expect(store.records.isEmpty, "pausing an unfinished focus must not record completion")
+
+    clock.date.addTimeInterval(100)
+    store.resume()
+    try expect(store.state == .running && store.remainingSeconds == 1_490, "time spent paused must not consume remaining focus")
+    clock.date.addTimeInterval(1_490)
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+    try expect(store.records.count == 1, "resumed focus should complete once")
+    try expect(store.records.first?.completedAt == clock.date, "resumed focus should use its updated deadline")
+    try expect(store.records.first?.durationSeconds == 1_500, "pause time must not inflate recorded focus duration")
+}
+
+private func delayedWakeRecordsOriginalDeadline() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let midnight = Calendar.current.startOfDay(for: Date())
+    let clock = TestClock(date: midnight.addingTimeInterval(-30 * 60))
+    let notifications = FakeNotificationService()
+    let store = NoiseStore(dataDirectory: directory, notificationService: notifications, now: { clock.date })
+    defer { store.stop() }
+    store.setFocusSound(.none)
+    store.startFocus()
+    let deadline = clock.date.addingTimeInterval(TimeInterval(store.durationSeconds))
+    clock.date = midnight.addingTimeInterval(8 * 60 * 60)
+
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+
+    try expect(store.records.count == 1, "delayed wake should settle the elapsed focus once")
+    try expect(store.records.first?.completedAt == deadline, "completion should use the deadline before midnight, not the wake time")
+    try expect(store.todayRecords.isEmpty, "yesterday's focus must not be counted as today's focus")
+    try expect(notifications.deliveries.first?.0.completedAt == deadline, "notification should use the same completion timestamp as the record")
+    let csv = NoiseExportService.csvString(records: store.records)
+    try expect(csv.contains(NoiseFormatters.iso8601.string(from: deadline)), "export should retain the original deadline")
+}
+
+private func zeroSecondPausedStateIsRecoveredOnce() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = TestClock()
+    try writeState(
+        in: directory,
+        mode: .focus,
+        state: .paused,
+        durationSeconds: 1_500,
+        remainingSeconds: 0,
+        taskTitle: "Previously stuck focus",
+        startedAt: clock.date.addingTimeInterval(-1_500),
+        endDate: nil,
+        completedFocusRoundsInCycle: 0,
+        settings: quietSettings()
+    )
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService(), now: { clock.date })
+    try expect(store.state == .idle && store.mode == .shortBreak, "a previously persisted zero-second pause should recover into rest")
+    try expect(store.records.count == 1, "the completed but stuck focus should be recorded")
+    let restored = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService(), now: { clock.date })
+    try expect(restored.records.count == 1, "relaunch must not record the recovered focus twice")
+}
+
+private func replayDuringFadeOutCancelsOldStop() throws {
+    let backend = FakeAudioPlayback()
+    var createdPlayers = 0
+    let audio = NoiseAudioPlayer { _ in
+        createdPlayers += 1
+        return backend
+    }
+    let sound = try availableTestSound()
+    audio.play(sound, volume: 0.4, fadeIn: 0)
+    audio.stop(fadeOut: 0.05)
+    audio.play(sound, volume: 0.4, fadeIn: 0)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+
+    try expect(createdPlayers == 1, "resuming the same sound should reuse the active player")
+    try expect(backend.isPlaying, "the old fade-out callback must not stop resumed playback")
+    try expect(backend.stopCount == 0, "resuming should invalidate the old stop operation")
+    try expect(backend.volume == 0.4, "resuming should restore the requested volume")
+
+    audio.stop(fadeOut: 0.05)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+    try expect(!backend.isPlaying && backend.stopCount == 1, "a subsequent intentional fade-out should still stop playback")
+}
+
+private func resumeStopsPreviewBeforeSessionAudio() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = TestClock()
+    let sessionBackend = FakeAudioPlayback()
+    let previewBackend = FakeAudioPlayback()
+    let store = NoiseStore(
+        dataDirectory: directory,
+        notificationService: FakeNotificationService(),
+        audioPlayer: NoiseAudioPlayer { _ in sessionBackend },
+        previewPlayer: NoiseAudioPlayer { _ in previewBackend },
+        now: { clock.date }
+    )
+    defer { store.stop() }
+    let sound = try availableTestSound()
+    store.setFocusSound(sound)
+    store.setBreakSound(sound)
+    store.setFadeOutSeconds(0)
+    store.startFocus()
+    clock.date.addTimeInterval(10)
+    store.pause()
+    store.previewBreakSound()
+    try expect(previewBackend.isPlaying && !sessionBackend.isPlaying, "only the preview should play while paused")
+    var previewWasStoppedBeforePlayback = false
+    sessionBackend.onPlay = { previewWasStoppedBeforePlayback = !previewBackend.isPlaying }
+
+    store.resume()
+
+    try expect(previewWasStoppedBeforePlayback, "resume must stop the preview before starting session audio")
+    try expect(sessionBackend.isPlaying && !previewBackend.isPlaying, "only the session sound should play after resume")
+    try expect(store.state == .running && store.remainingSeconds == 1_490, "stopping a preview must not reset the resumed timer")
+}
+
+private func quietSettings() -> NoiseSettings {
+    var settings = NoiseSettings.standard
+    settings.focusSoundID = NoiseSound.none.id
+    settings.breakSoundID = NoiseSound.none.id
+    settings.notificationsEnabled = false
+    return settings
+}
+
+private func availableTestSound() throws -> NoiseSound {
+    let sound = NoiseSoundLibrary.sound(for: nil)
+    try expect(!sound.isNone && NoiseSoundLibrary.url(for: sound) != nil, "audio tests require a bundled sound URL")
+    return sound
+}
+
+private final class TestClock {
+    var date: Date
+
+    init(date: Date = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970))) {
+        self.date = date
+    }
+}
+
+private final class FakeAudioPlayback: NoiseAudioPlayback {
+    private(set) var isPlaying = false
+    private(set) var stopCount = 0
+    var numberOfLoops = 0
+    var volume: Float = 0
+    var onPlay: (() -> Void)?
+
+    func prepareToPlay() -> Bool { true }
+
+    func play() -> Bool {
+        onPlay?()
+        isPlaying = true
+        return true
+    }
+
+    func stop() {
+        stopCount += 1
+        isPlaying = false
+    }
+
+    func setVolume(_ volume: Float, fadeDuration: TimeInterval) {
+        self.volume = volume
+    }
 }
 
 private func makeTemporaryDirectory() throws -> URL {

@@ -1,11 +1,35 @@
 import AVFoundation
 import Foundation
 
+protocol NoiseAudioPlayback: AnyObject {
+    var isPlaying: Bool { get }
+    var numberOfLoops: Int { get set }
+    var volume: Float { get set }
+    @discardableResult func prepareToPlay() -> Bool
+    @discardableResult func play() -> Bool
+    func stop()
+    func setVolume(_ volume: Float, fadeDuration: TimeInterval)
+}
+
+extension AVAudioPlayer: NoiseAudioPlayback {}
+
 final class NoiseAudioPlayer {
-    private var player: AVAudioPlayer?
+    private let makePlayer: (URL) throws -> NoiseAudioPlayback
+    private var pendingStop: DispatchWorkItem?
+    private var player: NoiseAudioPlayback?
     private var playingSound: NoiseSound = .none
 
+    init(makePlayer: @escaping (URL) throws -> NoiseAudioPlayback = { try AVAudioPlayer(contentsOf: $0) }) {
+        self.makePlayer = makePlayer
+    }
+
+    deinit {
+        pendingStop?.cancel()
+        player?.stop()
+    }
+
     func play(_ sound: NoiseSound, volume: Double, fadeIn: Double) {
+        cancelPendingStop()
         guard !sound.isNone else {
             stop(fadeOut: 0)
             return
@@ -23,7 +47,7 @@ final class NoiseAudioPlayer {
         }
 
         do {
-            let next = try AVAudioPlayer(contentsOf: url)
+            let next = try makePlayer(url)
             next.numberOfLoops = -1
             next.volume = fadeIn > 0 ? 0 : Float(min(max(volume, 0), 1))
             next.prepareToPlay()
@@ -45,6 +69,7 @@ final class NoiseAudioPlayer {
     }
 
     func stop(fadeOut: Double) {
+        cancelPendingStop()
         guard let current = player else {
             playingSound = .none
             return
@@ -53,16 +78,24 @@ final class NoiseAudioPlayer {
         let fadeOut = max(fadeOut, 0)
         if fadeOut > 0, current.isPlaying {
             current.setVolume(0, fadeDuration: fadeOut)
-            DispatchQueue.main.asyncAfter(deadline: .now() + fadeOut) { [weak self, weak current] in
-                guard self?.player === current else { return }
+            let workItem = DispatchWorkItem { [weak self, weak current] in
+                guard let self, self.player === current else { return }
                 current?.stop()
-                self?.player = nil
-                self?.playingSound = .none
+                self.player = nil
+                self.playingSound = .none
+                self.pendingStop = nil
             }
+            pendingStop = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + fadeOut, execute: workItem)
         } else {
             current.stop()
             player = nil
             playingSound = .none
         }
+    }
+
+    private func cancelPendingStop() {
+        pendingStop?.cancel()
+        pendingStop = nil
     }
 }

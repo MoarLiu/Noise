@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.1 - 2026-09-09
+
+Patch release focused on timer correctness and playback reliability.
+
+### Fixed
+
+- Manual rest actions now honor the scheduled short or long break.
+- Pausing at the exact end of a session now completes the session instead of leaving a stuck `00:00` timer.
+- Restored legacy zero-second paused sessions are recovered without duplicating records.
+- Delayed wake and sleep recovery preserve the session's original completion time for records, notifications, and statistics.
+- Resuming a paused session stops sound previews before session playback starts.
+- Replaying a sound during fade-out cancels the stale stop callback so playback continues.
+
+### Verification
+
+- 14 self-tests passed.
+- Release build completed with full Xcode.
+- DMG SHA-256: `d1802e4c7a5fbd8209aa77a504e2b4b6233a3b57496af381653f9abd0cde197d`.
+
 ## 0.1.0 - 2026-06-22
 
 Initial Noise release.

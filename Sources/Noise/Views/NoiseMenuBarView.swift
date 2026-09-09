@@ -30,7 +30,7 @@ struct NoiseMenuBarView: View {
                     store.startFocus()
                 }
                 Button("开始休息") {
-                    store.startShortBreak()
+                    store.startBreak()
                 }
             case .running:
                 Button("暂停") {

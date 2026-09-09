@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 DMG_ROOT="$DIST_DIR/dmg-root"
-DMG_PATH="$DIST_DIR/Noise-0.1.0-macos-arm64.dmg"
+DMG_PATH="$DIST_DIR/Noise-0.1.1-macos-arm64.dmg"
 
 cd "$ROOT_DIR"
 

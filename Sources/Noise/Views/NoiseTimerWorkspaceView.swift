@@ -126,7 +126,7 @@ struct NoiseSessionControlsView: View {
             switch store.state {
             case .idle:
                 Button {
-                    store.startShortBreak()
+                    store.startBreak()
                 } label: {
                     Label("休息", systemImage: "cup.and.saucer")
                 }
@@ -201,7 +201,7 @@ struct NoiseCompletionBanner: View {
 
             if completion.mode == .focus {
                 Button("休息一下") {
-                    store.startShortBreak()
+                    store.startBreak()
                 }
                 Button("再来一轮") {
                     store.startFocus()
