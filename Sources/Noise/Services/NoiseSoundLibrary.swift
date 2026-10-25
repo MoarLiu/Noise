@@ -2,9 +2,11 @@ import Foundation
 
 enum NoiseSoundLibrary {
     static let supportedExtensions = Set(["mp3", "m4a", "aiff", "aif", "wav"])
+    // The bundled catalog is immutable; timer redraws should not rescan the filesystem.
+    private static let availableSounds = bundledSounds()
 
     static var options: [NoiseSound] {
-        [.none] + bundledSounds()
+        [.none] + availableSounds
     }
 
     static var groupedOptions: [(category: NoiseSoundCategory, sounds: [NoiseSound])] {
@@ -73,7 +75,19 @@ enum NoiseSoundLibrary {
     }
 
     static func displayName(for filename: String) -> String {
-        URL(fileURLWithPath: filename)
+        let names = [
+            "Ocean Waves.mp3": "海边潮汐",
+            "Light Rain Falling on Forest Floor.mp3": "轻柔雨声",
+            "Duskfall on a River.mp3": "林间溪流",
+            "Peaceful Wind Atop a Hill.mp3": "山间微风",
+            "Mountain Atmosphere.mp3": "山野环境",
+            "Thunder in the Woods.mp3": "林间雷雨",
+            "Clock Ticking.wav": "时钟滴答",
+            "Kitchen Timer.wav": "厨房计时器",
+            "Gong.mp3": "铜锣提示"
+        ]
+        if let name = names[filename] { return name }
+        return URL(fileURLWithPath: filename)
             .deletingPathExtension()
             .lastPathComponent
             .replacingOccurrences(of: "_", with: " ")
@@ -124,7 +138,7 @@ enum NoiseSoundLibrary {
     private static func defaultFocusSound(from options: [NoiseSound]) -> NoiseSound {
         let preferred = ["ocean", "rain", "river", "wind", "mountain", "woods", "atmosphere"]
         for keyword in preferred {
-            if let sound = options.first(where: { !$0.isNone && $0.title.lowercased().contains(keyword) }) {
+            if let sound = options.first(where: { !$0.isNone && "\($0.title) \($0.filename ?? "")".lowercased().contains(keyword) }) {
                 return sound
             }
         }

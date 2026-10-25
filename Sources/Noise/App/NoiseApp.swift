@@ -10,14 +10,14 @@ struct NoiseApp: App {
         WindowGroup("Noise", id: "main") {
             ContentView(store: store)
         }
-        .defaultSize(width: 1260, height: 860)
+        .defaultSize(width: 980, height: 720)
         .commands {
             CommandMenu("Noise") {
                 Button("开始专注") {
                     store.startFocus()
                 }
                 .keyboardShortcut("f", modifiers: [.command, .option])
-                .disabled(store.state == .running)
+                .disabled(store.state != .idle)
 
                 Button(store.state == .paused ? "继续" : "暂停") {
                     store.state == .paused ? store.resume() : store.pause()

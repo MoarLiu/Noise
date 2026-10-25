@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+VERSION="0.2.0"
+BUILD="3"

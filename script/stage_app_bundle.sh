@@ -5,10 +5,9 @@ CONFIG="${1:-debug}"
 APP_NAME="Noise"
 BUNDLE_ID="com.crazyjal.noise"
 MIN_SYSTEM_VERSION="13.0"
-VERSION="0.1.1"
-BUILD="2"
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/script/release_version.sh"
+SCRATCH_PATH="${NOISE_BUILD_PATH:-$ROOT_DIR/.build}"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
@@ -20,6 +19,7 @@ ICON_SOURCE="$ROOT_DIR/Sources/Noise/Resources/AppIcon.icns"
 RESOURCE_SOURCE="$ROOT_DIR/Sources/Noise/Resources"
 
 cd "$ROOT_DIR"
+export COPYFILE_DISABLE=1
 
 if [ ! -f "$ICON_SOURCE" ]; then
   "$ROOT_DIR/script/generate_app_icon.swift"
@@ -27,12 +27,12 @@ fi
 
 case "$CONFIG" in
   debug)
-    swift build
-    BUILD_DIR="$(swift build --show-bin-path)"
+    swift build --scratch-path "$SCRATCH_PATH"
+    BUILD_DIR="$(swift build --scratch-path "$SCRATCH_PATH" --show-bin-path)"
     ;;
   release)
-    swift build -c release
-    BUILD_DIR="$(swift build -c release --show-bin-path)"
+    swift build --scratch-path "$SCRATCH_PATH" -c release
+    BUILD_DIR="$(swift build --scratch-path "$SCRATCH_PATH" -c release --show-bin-path)"
     ;;
   *)
     echo "usage: $0 [debug|release]" >&2
@@ -46,9 +46,12 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+if [ "$CONFIG" = "release" ]; then
+  xcrun strip -S "$APP_BINARY"
+fi
 
 if [ -d "$RESOURCE_SOURCE/Sounds" ]; then
-  cp -R "$RESOURCE_SOURCE/Sounds" "$APP_RESOURCES/"
+  cp -R -X "$RESOURCE_SOURCE/Sounds" "$APP_RESOURCES/"
 fi
 
 cp "$ICON_SOURCE" "$APP_RESOURCES/Noise.icns"

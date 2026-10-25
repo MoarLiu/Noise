@@ -3,12 +3,14 @@ set -euo pipefail
 
 APP_NAME="Noise"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/script/release_version.sh"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 DMG_ROOT="$DIST_DIR/dmg-root"
-DMG_PATH="$DIST_DIR/Noise-0.1.1-macos-arm64.dmg"
+DMG_PATH="$DIST_DIR/Noise-${VERSION}-macos-arm64.dmg"
 
 cd "$ROOT_DIR"
+export COPYFILE_DISABLE=1
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
@@ -22,7 +24,7 @@ fi
 
 rm -rf "$DMG_ROOT" "$DMG_PATH" "$DMG_PATH.sha256"
 mkdir -p "$DMG_ROOT"
-cp -R "$APP_BUNDLE" "$DMG_ROOT/"
+cp -R -X "$APP_BUNDLE" "$DMG_ROOT/"
 ln -s /Applications "$DMG_ROOT/Applications"
 
 hdiutil create \

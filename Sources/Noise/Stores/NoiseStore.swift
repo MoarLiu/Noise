@@ -37,6 +37,8 @@ final class NoiseStore: ObservableObject {
     @Published private(set) var persistenceError: String?
     @Published var exportSummary: NoiseExportSummary?
     @Published var exportErrorMessage: String?
+    @Published private(set) var previewingSoundID: String?
+    @Published private(set) var sessionID: UUID?
 
     private let fileManager = FileManager.default
     private let encoder: JSONEncoder
@@ -74,6 +76,10 @@ final class NoiseStore: ObservableObject {
         case .shortBreak, .longBreak:
             return breakSound
         }
+    }
+
+    private var playbackVolume: Double {
+        settings.isMuted ? 0 : settings.volume
     }
 
     var progress: Double {
@@ -177,6 +183,7 @@ final class NoiseStore: ObservableObject {
         self.persistenceError = loaded.recoveryMessage
 
         normalizeLoadedTimer()
+        if state != .idle, sessionID == nil { sessionID = UUID() }
         registerSystemObservers()
         if state == .running {
             scheduleTimerIfNeeded()
@@ -211,6 +218,14 @@ final class NoiseStore: ObservableObject {
         startSession(mode: .longBreak)
     }
 
+    func selectMode(_ mode: NoiseTimerMode) {
+        guard state == .idle else { return }
+        stopPreview()
+        self.mode = mode
+        lastCompletion = nil
+        syncIdleDurationIfNeeded()
+    }
+
     func pause() {
         guard state == .running else { return }
         updateRemainingFromEndDate()
@@ -239,16 +254,36 @@ final class NoiseStore: ObservableObject {
     }
 
     func stop() {
+        if state == .running {
+            updateRemainingFromEndDate()
+            if remainingSeconds <= 0 { completeCurrentSession() }
+        }
+        stopPreview()
         stopTimer()
         audioPlayer.stop(fadeOut: settings.fadeOutSeconds)
         state = .idle
+        sessionID = nil
         mode = .focus
         startedAt = nil
         endDate = nil
         durationSeconds = Self.durationSeconds(for: mode, settings: settings)
         remainingSeconds = durationSeconds
         completedFocusRoundsInCycle = 0
+        lastCompletion = nil
         save()
+    }
+
+    /// A confirmation belongs to the round that opened it, even across automatic transitions.
+    func stopSession(ifMatching expectedID: UUID) {
+        guard state != .idle, sessionID == expectedID else { return }
+        if state == .running {
+            updateRemainingFromEndDate()
+            if remainingSeconds <= 0 {
+                completeCurrentSession()
+                return
+            }
+        }
+        stop()
     }
 
     func setTaskTitle(_ value: String) {
@@ -259,13 +294,12 @@ final class NoiseStore: ObservableObject {
     }
 
     func useTaskTitle(_ value: String) {
+        guard state == .idle else { return }
         setTaskTitle(value)
-        if state == .idle {
-            startFocus()
-        }
     }
 
     func applyPreset(_ preset: NoisePreset) {
+        guard state == .idle else { return }
         var next = settings
         next.focusMinutes = preset.focusMinutes
         next.shortBreakMinutes = preset.shortBreakMinutes
@@ -311,18 +345,30 @@ final class NoiseStore: ObservableObject {
     }
 
     func setFocusSound(_ sound: NoiseSound) {
+        stopPreview()
         updateSettings { $0.focusSoundID = sound.id }
         updateSoundPlayback()
     }
 
     func setBreakSound(_ sound: NoiseSound) {
+        stopPreview()
         updateSettings { $0.breakSoundID = sound.id }
         updateSoundPlayback()
     }
 
     func setVolume(_ value: Double) {
-        updateSettings { $0.volume = value }
-        audioPlayer.updateVolume(settings.volume)
+        updateSettings {
+            $0.volume = value
+            $0.isMuted = false
+        }
+        audioPlayer.updateVolume(playbackVolume)
+        previewPlayer.updateVolume(playbackVolume)
+    }
+
+    func setMuted(_ value: Bool) {
+        updateSettings { $0.isMuted = value }
+        audioPlayer.updateVolume(playbackVolume)
+        previewPlayer.updateVolume(playbackVolume)
     }
 
     func setFadeInSeconds(_ value: Double) {
@@ -334,12 +380,12 @@ final class NoiseStore: ObservableObject {
     }
 
     func applySoundscape(_ preset: NoiseSoundscapePreset) {
+        stopPreview()
         let focus = NoiseSoundLibrary.bestMatch(keywords: preset.focusKeywords)
         let breakSound = preset.breakKeywords.map { NoiseSoundLibrary.bestMatch(keywords: $0) } ?? .none
         updateSettings {
             $0.focusSoundID = focus.id
             $0.breakSoundID = breakSound.id
-            $0.volume = preset.volume
         }
         updateSoundPlayback()
     }
@@ -385,6 +431,8 @@ final class NoiseStore: ObservableObject {
         let seconds = Self.durationSeconds(for: mode, settings: settings)
         stopPreview()
         stopTimer()
+        taskTitle = Self.limitedTaskTitle(taskTitle.trimmingCharacters(in: .whitespacesAndNewlines))
+        sessionID = UUID()
         self.mode = mode
         state = .running
         durationSeconds = seconds
@@ -401,6 +449,7 @@ final class NoiseStore: ObservableObject {
     private func completeCurrentSession() {
         guard !isCompleting else { return }
         isCompleting = true
+        sessionID = nil
         stopTimer()
         audioPlayer.stop(fadeOut: settings.fadeOutSeconds)
 
@@ -511,25 +560,28 @@ final class NoiseStore: ObservableObject {
             audioPlayer.stop(fadeOut: settings.fadeOutSeconds)
             return
         }
-        audioPlayer.play(activeSound, volume: settings.volume, fadeIn: settings.fadeInSeconds)
+        audioPlayer.play(activeSound, volume: playbackVolume, fadeIn: settings.fadeInSeconds)
     }
 
     private func preview(sound: NoiseSound) {
-        guard state != .running else { return }
+        guard state != .running, !sound.isNone else { return }
         previewStopWorkItem?.cancel()
-        previewPlayer.play(sound, volume: settings.volume, fadeIn: 0.2)
+        previewingSoundID = sound.id
+        previewPlayer.play(sound, volume: playbackVolume, fadeIn: 0.2)
         let workItem = DispatchWorkItem { [weak self] in
             self?.previewPlayer.stop(fadeOut: 0.3)
             self?.previewStopWorkItem = nil
+            self?.previewingSoundID = nil
         }
         previewStopWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.previewDurationSeconds, execute: workItem)
     }
 
-    private func stopPreview() {
+    func stopPreview() {
         previewStopWorkItem?.cancel()
         previewStopWorkItem = nil
         previewPlayer.stop(fadeOut: 0)
+        previewingSoundID = nil
     }
 
     private func updateSettings(_ mutate: (inout NoiseSettings) -> Void) {
@@ -758,10 +810,7 @@ final class NoiseStore: ObservableObject {
     }
 
     private static func limitedTaskTitle(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count > maxTaskTitleLength else { return trimmed }
-        let index = trimmed.index(trimmed.startIndex, offsetBy: maxTaskTitleLength)
-        return String(trimmed[..<index])
+        String(value.prefix(maxTaskTitleLength))
     }
 
     private static func filteredRecords(_ records: [NoiseFocusRecord], now: Date = Date()) -> [NoiseFocusRecord] {

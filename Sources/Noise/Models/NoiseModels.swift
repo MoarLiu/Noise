@@ -63,7 +63,7 @@ struct NoiseSound: Codable, Equatable, Identifiable, Hashable {
     var title: String
     var filename: String?
 
-    static let none = NoiseSound(id: "none", title: "关闭", filename: nil)
+    static let none = NoiseSound(id: "none", title: "静音", filename: nil)
 
     var isNone: Bool {
         filename == nil || id == Self.none.id
@@ -143,6 +143,7 @@ struct NoiseSettings: Codable, Equatable {
     var focusSoundID: String?
     var breakSoundID: String?
     var volume: Double
+    var isMuted: Bool
     var fadeInSeconds: Double
     var fadeOutSeconds: Double
     var notificationsEnabled: Bool
@@ -157,6 +158,7 @@ struct NoiseSettings: Codable, Equatable {
         case focusSoundID
         case breakSoundID
         case volume
+        case isMuted
         case fadeInSeconds
         case fadeOutSeconds
         case notificationsEnabled
@@ -189,7 +191,8 @@ struct NoiseSettings: Codable, Equatable {
         volume: Double,
         fadeInSeconds: Double,
         fadeOutSeconds: Double,
-        notificationsEnabled: Bool
+        notificationsEnabled: Bool,
+        isMuted: Bool = false
     ) {
         self.focusMinutes = focusMinutes
         self.shortBreakMinutes = shortBreakMinutes
@@ -200,6 +203,7 @@ struct NoiseSettings: Codable, Equatable {
         self.focusSoundID = focusSoundID
         self.breakSoundID = breakSoundID
         self.volume = volume
+        self.isMuted = isMuted
         self.fadeInSeconds = fadeInSeconds
         self.fadeOutSeconds = fadeOutSeconds
         self.notificationsEnabled = notificationsEnabled
@@ -217,6 +221,7 @@ struct NoiseSettings: Codable, Equatable {
         focusSoundID = try container.decodeIfPresent(String.self, forKey: .focusSoundID) ?? fallback.focusSoundID
         breakSoundID = try container.decodeIfPresent(String.self, forKey: .breakSoundID) ?? fallback.breakSoundID
         volume = try container.decodeIfPresent(Double.self, forKey: .volume) ?? fallback.volume
+        isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
         fadeInSeconds = try container.decodeIfPresent(Double.self, forKey: .fadeInSeconds) ?? fallback.fadeInSeconds
         fadeOutSeconds = try container.decodeIfPresent(Double.self, forKey: .fadeOutSeconds) ?? fallback.fadeOutSeconds
         notificationsEnabled = try container.decodeIfPresent(Bool.self, forKey: .notificationsEnabled) ?? fallback.notificationsEnabled
@@ -303,6 +308,17 @@ enum NoisePreset: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    var name: String {
+        switch self {
+        case .classic: return "经典"
+        case .deepWork: return "深度"
+        case .writing: return "写作"
+        case .reading: return "阅读"
+        }
+    }
+
+    var displayTitle: String { "\(name) · \(title)" }
+
     var title: String {
         switch self {
         case .classic:
@@ -344,7 +360,6 @@ enum NoiseSoundscapePreset: String, CaseIterable, Identifiable {
     case rainyWriting
     case riversideReading
     case mountainReset
-    case silentBreak
 
     var id: String { rawValue }
 
@@ -358,8 +373,6 @@ enum NoiseSoundscapePreset: String, CaseIterable, Identifiable {
             return "河边阅读"
         case .mountainReset:
             return "山间复位"
-        case .silentBreak:
-            return "安静休息"
         }
     }
 
@@ -373,8 +386,6 @@ enum NoiseSoundscapePreset: String, CaseIterable, Identifiable {
             return "河流声景，休息静音"
         case .mountainReset:
             return "山风环境，长时间任务"
-        case .silentBreak:
-            return "专注有声，休息静音"
         }
     }
 
@@ -388,8 +399,6 @@ enum NoiseSoundscapePreset: String, CaseIterable, Identifiable {
             return ["river", "duskfall"]
         case .mountainReset:
             return ["mountain", "wind"]
-        case .silentBreak:
-            return ["ocean", "rain"]
         }
     }
 
@@ -397,23 +406,8 @@ enum NoiseSoundscapePreset: String, CaseIterable, Identifiable {
         switch self {
         case .rainyWriting:
             return ["gong"]
-        case .deepWork, .riversideReading, .mountainReset, .silentBreak:
+        case .deepWork, .riversideReading, .mountainReset:
             return nil
-        }
-    }
-
-    var volume: Double {
-        switch self {
-        case .deepWork:
-            return 0.38
-        case .rainyWriting:
-            return 0.34
-        case .riversideReading:
-            return 0.36
-        case .mountainReset:
-            return 0.32
-        case .silentBreak:
-            return 0.30
         }
     }
 }

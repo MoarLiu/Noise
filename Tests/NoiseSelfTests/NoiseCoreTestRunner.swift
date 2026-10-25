@@ -18,6 +18,19 @@ struct NoiseCoreTestRunner {
         try run("zero-second paused state is recovered once", zeroSecondPausedStateIsRecoveredOnce)
         try run("replay during fade-out cancels the old stop", replayDuringFadeOutCancelsOldStop)
         try run("resume stops preview before starting session audio", resumeStopsPreviewBeforeSessionAudio)
+        try run("recent task selection fills without starting a timer", recentTaskSelectionDoesNotStart)
+        try run("mode selection prepares an idle timer without replacing active work", modeSelectionPreparesIdleTimer)
+        try run("presets cannot replace active timer settings", activePresetsAreIgnored)
+        try run("soundscape selection preserves volume and mute", soundscapePreservesVolumeAndMute)
+        try run("mute affects playback and preview without losing the saved volume", mutePreservesVolumeAcrossPlayback)
+        try run("legacy settings without mute remain compatible", legacySettingsWithoutMuteDecode)
+        try run("duration changes take effect on the next round", durationChangesApplyNextRound)
+        try run("localized sound labels preserve default selection and grouping", localizedSoundLabelsPreserveSelection)
+        try run("old end confirmations cannot stop a later automatic round", staleEndConfirmationDoesNotStopNextRound)
+        try run("confirming end at the deadline preserves completion", endConfirmationAtDeadlinePreservesCompletion)
+        try run("end confirmation identity survives pause and resume", endConfirmationIdentitySurvivesPause)
+        try run("direct stop at deadline records completion before returning idle", directStopAtDeadlinePreservesCompletion)
+        try run("task editing preserves word separators until the round starts", taskEditingPreservesSpaces)
         print("All Noise self-tests passed.")
     }
 
@@ -370,6 +383,241 @@ private func resumeStopsPreviewBeforeSessionAudio() throws {
     try expect(previewWasStoppedBeforePlayback, "resume must stop the preview before starting session audio")
     try expect(sessionBackend.isPlaying && !previewBackend.isPlaying, "only the session sound should play after resume")
     try expect(store.state == .running && store.remainingSeconds == 1_490, "stopping a preview must not reset the resumed timer")
+}
+
+private func recentTaskSelectionDoesNotStart() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let notifications = FakeNotificationService()
+    let store = NoiseStore(dataDirectory: directory, notificationService: notifications)
+    store.useTaskTitle("Selected recent task")
+    try expect(store.state == .idle && store.remainingSeconds == 1_500, "selecting a title must leave the timer idle")
+    try expect(store.taskTitle == "Selected recent task", "the title should be filled")
+    try expect(notifications.authorizationRequests == 0 && notifications.deliveries.isEmpty, "selection must not request notifications")
+    let restored = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService())
+    try expect(restored.taskTitle == store.taskTitle && restored.state == .idle, "the selected title should survive relaunch without starting")
+    store.setFocusSound(.none)
+    store.startFocus()
+    defer { store.stop() }
+    store.useTaskTitle("Unexpected replacement")
+    try expect(store.taskTitle == "Selected recent task", "recent tasks must not rename an active round")
+}
+
+private func modeSelectionPreparesIdleTimer() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = TestClock()
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService(), now: { clock.date })
+    store.setFocusSound(.none)
+    store.setBreakSound(.none)
+    store.selectMode(.longBreak)
+    try expect(store.state == .idle && store.mode == .longBreak && store.remainingSeconds == 900, "selecting long break must prepare, not start, it")
+    store.selectMode(.shortBreak)
+    try expect(store.state == .idle && store.remainingSeconds == 300, "short break should have its configured duration")
+    store.startShortBreak()
+    defer { store.stop() }
+    clock.date.addTimeInterval(10)
+    store.selectMode(.focus)
+    try expect(store.state == .running && store.mode == .shortBreak, "selection must not replace a running round")
+    store.pause()
+    store.selectMode(.focus)
+    try expect(store.state == .paused && store.mode == .shortBreak && store.remainingSeconds == 290, "selection must not discard a paused round")
+}
+
+private func activePresetsAreIgnored() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService())
+    store.setFocusSound(.none)
+    store.startFocus()
+    defer { store.stop() }
+    store.applyPreset(.deepWork)
+    try expect(store.settings.focusMinutes == 25 && store.durationSeconds == 1_500, "an active preset must not replace the running plan")
+    store.pause()
+    store.applyPreset(.reading)
+    try expect(store.settings.focusMinutes == 25 && store.remainingSeconds > 0, "an active preset must not replace a paused plan")
+    store.stop()
+    store.applyPreset(.deepWork)
+    try expect(store.settings.focusMinutes == 50 && store.remainingSeconds == 3_000, "idle presets should update the prepared duration")
+}
+
+private func soundscapePreservesVolumeAndMute() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService())
+    store.setVolume(0.17)
+    store.setMuted(true)
+    for preset in NoiseSoundscapePreset.allCases {
+        store.applySoundscape(preset)
+        try expect(store.settings.volume == 0.17 && store.settings.isMuted, "soundscape selection must preserve volume and mute")
+        try expect(store.focusSound == NoiseSoundLibrary.bestMatch(keywords: preset.focusKeywords), "the focus sound should still change")
+        if preset.breakKeywords == nil { try expect(store.breakSound.isNone, "silent breaks must remain silent") }
+    }
+}
+
+private func mutePreservesVolumeAcrossPlayback() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = FakeAudioPlayback()
+    let preview = FakeAudioPlayback()
+    let store = NoiseStore(
+        dataDirectory: directory,
+        notificationService: FakeNotificationService(),
+        audioPlayer: NoiseAudioPlayer { _ in backend },
+        previewPlayer: NoiseAudioPlayer { _ in preview }
+    )
+    defer { store.stop() }
+    store.setFocusSound(try availableTestSound())
+    store.setFadeInSeconds(0)
+    store.setFadeOutSeconds(0)
+    store.setVolume(0.27)
+    store.setMuted(true)
+    store.startFocus()
+    try expect(backend.isPlaying && backend.volume == 0, "starting while muted must not produce audible playback")
+    store.setMuted(false)
+    try expect(abs(backend.volume - 0.27) < 0.001 && store.settings.volume == 0.27, "unmute should restore the original volume")
+    store.pause()
+    store.previewFocusSound()
+    try expect(store.previewingSoundID == store.focusSound.id && preview.isPlaying, "preview state should be visible")
+    store.setMuted(true)
+    try expect(preview.volume == 0 && store.settings.volume == 0.27, "muting must also silence the preview")
+    store.setVolume(0.43)
+    try expect(!store.settings.isMuted && abs(preview.volume - 0.43) < 0.001, "changing volume should unmute and update the preview")
+    store.stopPreview()
+    try expect(store.previewingSoundID == nil && !preview.isPlaying, "stopping a preview should clear its state")
+    store.setMuted(true)
+    let restored = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService())
+    try expect(restored.settings.isMuted && restored.settings.volume == 0.43, "mute and the original volume must both persist")
+}
+
+private func legacySettingsWithoutMuteDecode() throws {
+    var object = try require(JSONSerialization.jsonObject(with: JSONEncoder().encode(NoiseSettings.standard)) as? [String: Any], "settings should encode as an object")
+    object.removeValue(forKey: "isMuted")
+    let legacy = try JSONDecoder().decode(NoiseSettings.self, from: JSONSerialization.data(withJSONObject: object))
+    try expect(!legacy.isMuted && legacy.volume == NoiseSettings.standard.volume, "legacy settings should remain unmuted and retain volume")
+}
+
+private func durationChangesApplyNextRound() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = TestClock()
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService(), now: { clock.date })
+    store.setFocusSound(.none)
+    store.startFocus()
+    defer { store.stop() }
+    clock.date.addTimeInterval(15)
+    store.pause()
+    store.setFocusMinutes(45)
+    try expect(store.durationSeconds == 1_500 && store.remainingSeconds == 1_485, "changing a setting must preserve the active round")
+    store.resume()
+    store.stop()
+    try expect(store.remainingSeconds == 2_700, "the next prepared focus should use the updated duration")
+}
+
+private func localizedSoundLabelsPreserveSelection() throws {
+    let ocean = NoiseSoundLibrary.sound(for: nil)
+    try expect(ocean.filename == "Ocean Waves.mp3" && ocean.title == "海边潮汐", "localization must retain the preferred default sound")
+    let rain = NoiseSoundLibrary.bestMatch(keywords: ["rain", "falling"])
+    try expect(rain.title == "轻柔雨声" && rain.category == .rain, "localized labels must preserve filename-based matching and grouping")
+    try expect(NoiseSoundLibrary.displayName(for: "Custom_Ambience.wav") == "Custom Ambience", "unknown sound filenames should retain a readable fallback")
+}
+
+private func staleEndConfirmationDoesNotStopNextRound() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = TestClock()
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService(), now: { clock.date })
+    defer { store.stop() }
+    store.setFocusSound(.none)
+    store.setBreakSound(.none)
+    store.setAutoStartNextRound(true)
+    store.startFocus()
+    let originalID = try require(store.sessionID, "a running round must have an identity")
+    clock.date.addTimeInterval(TimeInterval(store.durationSeconds))
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+    let nextID = try require(store.sessionID, "the automatic break must have a new identity")
+    try expect(originalID != nextID && store.mode == .shortBreak, "automatic transitions must create a distinct round")
+
+    store.stopSession(ifMatching: originalID)
+
+    try expect(store.state == .running && store.sessionID == nextID, "a stale confirmation must not end the next round")
+    try expect(store.records.count == 1, "the completed focus record must remain intact")
+}
+
+private func endConfirmationAtDeadlinePreservesCompletion() throws {
+    for autoStart in [false, true] {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = TestClock()
+        let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService(), now: { clock.date })
+        defer { store.stop() }
+        store.setFocusSound(.none)
+        store.setBreakSound(.none)
+        store.setAutoStartNextRound(autoStart)
+        store.startFocus()
+        let originalID = try require(store.sessionID, "a running round must have an identity")
+        clock.date.addTimeInterval(TimeInterval(store.durationSeconds))
+
+        // The deadline passed, but its timer callback has not run yet.
+        store.stopSession(ifMatching: originalID)
+
+        try expect(store.records.count == 1 && store.mode == .shortBreak, "confirming at the deadline must complete, not discard, the focus")
+        try expect(store.state == (autoStart ? .running : .idle), "completion should honor the automatic next-round setting")
+        store.stopSession(ifMatching: originalID)
+        try expect(store.records.count == 1, "a repeated stale confirmation must not duplicate completion")
+    }
+}
+
+private func endConfirmationIdentitySurvivesPause() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService())
+    store.setFocusSound(.none)
+    store.startFocus()
+    let originalID = try require(store.sessionID, "a running round must have an identity")
+    store.pause()
+    store.resume()
+    try expect(store.sessionID == originalID, "pause and resume must preserve the same round")
+    store.stopSession(ifMatching: originalID)
+    try expect(store.state == .idle && store.sessionID == nil && store.records.isEmpty, "confirming an unfinished matching round should end it without a completed record")
+}
+
+private func directStopAtDeadlinePreservesCompletion() throws {
+    for autoStart in [false, true] {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = TestClock()
+        let notifications = FakeNotificationService()
+        let store = NoiseStore(dataDirectory: directory, notificationService: notifications, now: { clock.date })
+        store.setFocusSound(.none)
+        store.setBreakSound(.none)
+        store.setAutoStartNextRound(autoStart)
+        store.startFocus()
+        clock.date.addTimeInterval(TimeInterval(store.durationSeconds))
+
+        store.stop()
+
+        try expect(store.records.count == 1, "menu or command stop must not discard an already completed focus")
+        try expect(store.state == .idle && store.mode == .focus && store.sessionID == nil, "an explicit stop should return idle even when automatic start is enabled")
+        try expect(notifications.deliveries.count == 1, "an already completed focus should notify exactly once")
+    }
+}
+
+private func taskEditingPreservesSpaces() throws {
+    let directory = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = NoiseStore(dataDirectory: directory, notificationService: FakeNotificationService())
+    for character in " Write a plan " {
+        // SwiftUI feeds the new field value back after every character.
+        store.setTaskTitle(store.taskTitle + String(character))
+    }
+    try expect(store.taskTitle == " Write a plan ", "editing must not trim the separator before the next word is entered")
+    store.setFocusSound(.none)
+    store.startFocus()
+    try expect(store.taskTitle == "Write a plan", "starting a round should normalize surrounding whitespace")
+    store.stop()
+    store.setTaskTitle(String(repeating: "🍅", count: 101))
+    try expect(store.taskTitle == String(repeating: "🍅", count: 100), "the input limit must preserve complete characters")
 }
 
 private func quietSettings() -> NoiseSettings {
